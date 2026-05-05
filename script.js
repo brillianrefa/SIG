@@ -1,0 +1,679 @@
+/**
+ * SiGaRis – Sistem Informasi Geospasial Risiko Bencana Jawa Timur
+ * script.js – Main Application Logic
+ *
+ * Modules:
+ *  1. Config & State
+ *  2. Map Initialization
+ *  3. GeoJSON Loader & Renderer
+ *  4. Risk Color Mapping
+ *  5. Popup Builder
+ *  6. Filter Logic
+ *  7. Search Logic
+ *  8. Dashboard Stats
+ *  9. Top Regions List
+ * 10. Insight Generator
+ * 11. UI Utilities (sidebar, modal, clock)
+ */
+
+/* ══════════════════════════════════════════
+   1. CONFIG & STATE
+══════════════════════════════════════════ */
+const CONFIG = {
+  /** Path to the GeoJSON data file */
+  geojsonPath: 'data/bencana_kabkota_final.geojson',
+
+  /** Initial map center: East Java centroid */
+  mapCenter: [-7.5360, 112.2384],
+  mapZoom: 8,
+
+  /** Risk level definitions */
+  riskColors: {
+    high: '#D64545',
+    medium: '#F2C94C',
+    low: '#27AE60',
+  },
+
+  /** Risk level display names (Indonesian) */
+  riskLabels: {
+    high: 'Risiko Tinggi',
+    medium: 'Risiko Sedang',
+    low: 'Risiko Rendah',
+  },
+};
+
+/**
+ * Application state – single source of truth.
+ */
+const STATE = {
+  /** Raw GeoJSON FeatureCollection loaded from file */
+  geojsonData: null,
+
+  /** Active disaster type filter */
+  activeFilter: 'Semua',
+
+  /** Leaflet map instance */
+  map: null,
+
+  /** Leaflet GeoJSON layer currently on map */
+  geojsonLayer: null,
+
+  /** Map from region name → Leaflet layer (for search zoom) */
+  layerMap: {},
+};
+
+
+/* ══════════════════════════════════════════
+   2. MAP INITIALIZATION
+══════════════════════════════════════════ */
+/**
+ * Creates and configures the Leaflet map.
+ */
+function initMap() {
+  STATE.map = L.map('map', {
+    center: CONFIG.mapCenter,
+    zoom: CONFIG.mapZoom,
+    zoomControl: false,        // We'll place zoom control manually
+    attributionControl: true,
+  });
+
+  /* ── OpenStreetMap basemap ── */
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+    maxZoom: 18,
+  }).addTo(STATE.map);
+
+  /* ── Place zoom control at top-right ── */
+  L.control.zoom({ position: 'topright' }).addTo(STATE.map);
+
+  /* ── Close search dropdown when clicking map ── */
+  STATE.map.on('click', () => hideSearchDropdown());
+}
+
+
+/* ══════════════════════════════════════════
+   3. GEOJSON LOADER & RENDERER
+══════════════════════════════════════════ */
+/**
+ * Fetches GeoJSON from disk and bootstraps the app.
+ */
+async function loadGeoJSON() {
+  try {
+    const response = await fetch(CONFIG.geojsonPath);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    STATE.geojsonData = await response.json();
+
+    // Hide loading screen
+    document.getElementById('mapLoading').classList.add('hidden');
+
+    // Initial render with all data
+    renderGeoJSON(STATE.geojsonData.features);
+    updateDashboard(STATE.geojsonData.features);
+    updateTopRegions(STATE.geojsonData.features);
+    updateInsight(STATE.geojsonData.features);
+
+  } catch (err) {
+    console.error('Failed to load GeoJSON:', err);
+    const loading = document.getElementById('mapLoading');
+    loading.innerHTML = `
+      <div style="text-align:center;color:#D64545;padding:24px">
+        <div style="font-size:32px">⚠️</div>
+        <p style="margin-top:8px;font-weight:600">Gagal memuat data peta</p>
+        <p style="font-size:12px;margin-top:4px;color:#666">Pastikan file <code>data/jatim.geojson</code> tersedia</p>
+        <p style="font-size:11px;margin-top:4px;color:#999">${err.message}</p>
+      </div>`;
+  }
+}
+
+/**
+ * Renders GeoJSON features on the map.
+ * Removes the old layer first, then adds a fresh one.
+ *
+ * @param {Array} features - Array of GeoJSON Feature objects
+ */
+function renderGeoJSON(features) {
+  // Remove previous layer if it exists
+  if (STATE.geojsonLayer) {
+    STATE.map.removeLayer(STATE.geojsonLayer);
+    STATE.geojsonLayer = null;
+    STATE.layerMap = {};
+  }
+
+  // Build a synthetic FeatureCollection from the provided features
+  const collection = {
+    type: 'FeatureCollection',
+    features: features,
+  };
+
+  STATE.geojsonLayer = L.geoJSON(collection, {
+    style: styleFeature,
+    onEachFeature: onEachFeature,
+  }).addTo(STATE.map);
+}
+
+
+/* ══════════════════════════════════════════
+   4. RISK COLOR MAPPING
+══════════════════════════════════════════ */
+/**
+ * Returns the fill color string for a given risk_level.
+ *
+ * @param {string} riskLevel - 'high' | 'medium' | 'low'
+ * @returns {string} hex color
+ */
+function getRiskColor(riskLevel) {
+  return CONFIG.riskColors[riskLevel] || '#AAAAAA';
+}
+
+/**
+ * Leaflet style function – called for each feature.
+ *
+ * @param {Object} feature - GeoJSON feature
+ * @returns {Object} Leaflet PathOptions
+ */
+function styleFeature(feature) {
+  const risk = feature.properties.risk_level;
+  return {
+    fillColor: getRiskColor(risk),
+    fillOpacity: 0.65,
+    color: '#FFFFFF',
+    weight: 1.8,
+    opacity: 0.9,
+  };
+}
+
+/**
+ * Returns highlight style on hover.
+ */
+function styleHighlight(risk) {
+  return {
+    fillColor: getRiskColor(risk),
+    fillOpacity: 0.85,
+    color: '#1F4739',
+    weight: 2.5,
+    opacity: 1,
+  };
+}
+
+
+/* ══════════════════════════════════════════
+   5. POPUP BUILDER & EVENT HANDLERS
+══════════════════════════════════════════ */
+/**
+ * Formats a damage number as Indonesian Rupiah (abbreviated).
+ *
+ * @param {number} amount
+ * @returns {string}
+ */
+function formatRupiah(amount) {
+  if (amount >= 1_000_000_000) {
+    return `Rp ${(amount / 1_000_000_000).toFixed(1)} M`;
+  }
+  if (amount >= 1_000_000) {
+    return `Rp ${(amount / 1_000_000).toFixed(0)} Jt`;
+  }
+  return `Rp ${amount.toLocaleString('id-ID')}`;
+}
+
+/**
+ * Builds the HTML string for a Leaflet popup.
+ *
+ * @param {Object} props - GeoJSON feature properties
+ * @returns {string} HTML
+ */
+function buildPopupHTML(props) {
+  const risk = props.risk_level;
+  const riskLabel = CONFIG.riskLabels[risk] || risk;
+  return `
+    <div class="custom-popup">
+      <div class="popup-header ${risk}">
+        <div class="popup-risk-label">${riskLabel}</div>
+        <div class="popup-name">${props.name}</div>
+        <div class="popup-disaster">🏷️ ${props.disaster_type}</div>
+      </div>
+      <div class="popup-body">
+        <div class="popup-stat">
+          <div class="popup-stat-val">💔 ${props.deaths}</div>
+          <div class="popup-stat-lbl">Korban Jiwa</div>
+        </div>
+        <div class="popup-stat">
+          <div class="popup-stat-val">🏥 ${props.injuries}</div>
+          <div class="popup-stat-lbl">Luka-luka</div>
+        </div>
+        <div class="popup-stat">
+          <div class="popup-stat-val">${formatRupiah(props.damage)}</div>
+          <div class="popup-stat-lbl">Kerugian</div>
+        </div>
+        <div class="popup-stat">
+          <div class="popup-stat-val">📊 ${riskLabel}</div>
+          <div class="popup-stat-lbl">Tingkat Risiko</div>
+        </div>
+      </div>
+    </div>`;
+}
+
+/**
+ * Opens the bottom modal with region details (used on mobile/click).
+ *
+ * @param {Object} props
+ */
+function openRegionModal(props) {
+  const risk = props.risk_level;
+  const overlay = document.getElementById('regionModalOverlay');
+  const header = document.getElementById('modalHeader');
+
+  // Set header color class
+  header.className = 'modal-header ' + risk;
+  document.getElementById('modalRiskBadge').textContent = CONFIG.riskLabels[risk] || risk;
+  document.getElementById('modalName').textContent = props.name;
+  document.getElementById('modalDisaster').textContent = '🏷️ ' + props.disaster_type;
+  document.getElementById('modalDeaths').textContent = props.deaths;
+  document.getElementById('modalInjuries').textContent = props.injuries;
+  document.getElementById('modalDamage').textContent = formatRupiah(props.damage);
+  document.getElementById('modalRisk').textContent = CONFIG.riskLabels[risk] || risk;
+
+  overlay.classList.add('show');
+}
+
+/**
+ * Attaches hover + click events to each GeoJSON feature.
+ *
+ * @param {Object} feature - GeoJSON feature
+ * @param {Object} layer   - Leaflet layer
+ */
+function onEachFeature(feature, layer) {
+  const props = feature.properties;
+
+  // Store reference for search zoom
+  STATE.layerMap[props.name] = layer;
+
+  // ── Hover: highlight ──
+  layer.on('mouseover', function (e) {
+    this.setStyle(styleHighlight(props.risk_level));
+    this.bringToFront();
+
+    // Show tooltip near cursor
+    this.bindTooltip(`<strong>${props.name}</strong><br/>${props.disaster_type}`, {
+      permanent: false,
+      direction: 'top',
+      className: 'leaflet-tooltip',
+      offset: [0, -6],
+    }).openTooltip(e.latlng);
+  });
+
+  // ── Mouse out: reset style ──
+  layer.on('mouseout', function () {
+    STATE.geojsonLayer.resetStyle(this);
+    this.closeTooltip();
+  });
+
+  // ── Click: show popup + bottom modal ──
+  layer.on('click', function (e) {
+    // Popup on map
+    L.popup({ maxWidth: 280, offset: [0, -6] })
+      .setLatLng(e.latlng)
+      .setContent(buildPopupHTML(props))
+      .openOn(STATE.map);
+
+    // Bottom modal (good for mobile)
+    openRegionModal(props);
+  });
+}
+
+
+/* ══════════════════════════════════════════
+   6. FILTER LOGIC
+══════════════════════════════════════════ */
+/**
+ * Filters features by disaster_type and re-renders the map + stats.
+ *
+ * @param {string} filterValue - disaster type or 'Semua'
+ */
+function applyFilter(filterValue) {
+  STATE.activeFilter = filterValue;
+
+  const allFeatures = STATE.geojsonData.features;
+  const filtered = filterValue === 'Semua'
+    ? allFeatures
+    : allFeatures.filter(f => f.properties.disaster_type === filterValue);
+
+  renderGeoJSON(filtered);
+  updateDashboard(filtered);
+  updateTopRegions(filtered);
+  updateInsight(filtered);
+
+  // Update topbar badge
+  document.getElementById('activeBadge').textContent =
+    filterValue === 'Semua' ? 'Semua Bencana' : filterValue;
+}
+
+/**
+ * Sets up click listeners on filter buttons.
+ */
+function initFilterButtons() {
+  const group = document.getElementById('filterGroup');
+  group.addEventListener('click', (e) => {
+    const btn = e.target.closest('.filter-btn');
+    if (!btn) return;
+
+    // Update active state
+    group.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+
+    applyFilter(btn.dataset.value);
+  });
+}
+
+
+/* ══════════════════════════════════════════
+   7. SEARCH LOGIC
+══════════════════════════════════════════ */
+/**
+ * Filters region names matching the query and shows a dropdown.
+ *
+ * @param {string} query - raw user input
+ */
+function handleSearch(query) {
+  const dropdown = document.getElementById('searchDropdown');
+  if (!query.trim() || !STATE.geojsonData) {
+    hideSearchDropdown();
+    return;
+  }
+
+  const q = query.toLowerCase();
+  const matches = STATE.geojsonData.features
+    .filter(f => f.properties.name.toLowerCase().includes(q))
+    .slice(0, 6); // max 6 results
+
+  if (matches.length === 0) {
+    dropdown.innerHTML = `<div class="search-result-item" style="color:#999">Tidak ditemukan</div>`;
+    dropdown.classList.add('show');
+    return;
+  }
+
+  dropdown.innerHTML = matches.map(f => {
+    const p = f.properties;
+    const color = getRiskColor(p.risk_level);
+    return `
+      <div class="search-result-item" data-name="${p.name}">
+        <span class="search-result-dot" style="background:${color}"></span>
+        <span class="search-result-name">${p.name}</span>
+        <span class="search-result-type">${p.disaster_type}</span>
+      </div>`;
+  }).join('');
+
+  dropdown.classList.add('show');
+}
+
+/**
+ * Zooms the map to a region by name and opens its popup.
+ *
+ * @param {string} name - exact region name
+ */
+function zoomToRegion(name) {
+  const feature = STATE.geojsonData.features.find(f => f.properties.name === name);
+  if (!feature) return;
+
+  const layer = STATE.layerMap[name];
+  if (!layer) return;
+
+  // Close search UI
+  document.getElementById('searchInput').value = name;
+  hideSearchDropdown();
+
+  // Pan/zoom to region bounds
+  STATE.map.fitBounds(layer.getBounds(), { padding: [40, 40] });
+
+  // Highlight it briefly
+  layer.setStyle(styleHighlight(feature.properties.risk_level));
+  setTimeout(() => STATE.geojsonLayer.resetStyle(layer), 2000);
+
+  // Open popup at centroid
+  const center = layer.getBounds().getCenter();
+  L.popup({ maxWidth: 280 })
+    .setLatLng(center)
+    .setContent(buildPopupHTML(feature.properties))
+    .openOn(STATE.map);
+
+  // Also open modal
+  openRegionModal(feature.properties);
+}
+
+/** Hides the autocomplete dropdown */
+function hideSearchDropdown() {
+  const dd = document.getElementById('searchDropdown');
+  dd.classList.remove('show');
+}
+
+/** Initializes search input and dropdown listeners */
+function initSearch() {
+  const input = document.getElementById('searchInput');
+  const dropdown = document.getElementById('searchDropdown');
+
+  input.addEventListener('input', () => handleSearch(input.value));
+
+  // Delegate click on dropdown items
+  dropdown.addEventListener('click', (e) => {
+    const item = e.target.closest('.search-result-item');
+    if (item && item.dataset.name) {
+      zoomToRegion(item.dataset.name);
+    }
+  });
+
+  // Hide dropdown on Escape
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') hideSearchDropdown();
+  });
+
+  // Hide on outside click
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('.search-wrapper')) {
+      hideSearchDropdown();
+    }
+  });
+}
+
+
+/* ══════════════════════════════════════════
+   8. DASHBOARD STATS
+══════════════════════════════════════════ */
+/**
+ * Animates a number counter from 0 to target.
+ *
+ * @param {HTMLElement} el
+ * @param {number}      target
+ * @param {string}      [prefix='']
+ * @param {string}      [suffix='']
+ * @param {boolean}     [isRupiah=false]
+ */
+function animateCount(el, target, prefix = '', suffix = '', isRupiah = false) {
+  const duration = 700;
+  const start = performance.now();
+
+  function step(now) {
+    const elapsed = now - start;
+    const progress = Math.min(elapsed / duration, 1);
+    // Ease-out
+    const ease = 1 - Math.pow(1 - progress, 3);
+    const value = Math.round(ease * target);
+
+    if (isRupiah) {
+      el.textContent = formatRupiah(value);
+    } else {
+      el.textContent = prefix + value.toLocaleString('id-ID') + suffix;
+    }
+
+    if (progress < 1) requestAnimationFrame(step);
+  }
+  requestAnimationFrame(step);
+}
+
+/**
+ * Aggregates stats from visible features and updates the sidebar cards.
+ *
+ * @param {Array} features
+ */
+function updateDashboard(features) {
+  const totalDisasters = features.length;
+  const totalDeaths = features.reduce((s, f) => s + f.properties.deaths, 0);
+  const totalInjuries = features.reduce((s, f) => s + f.properties.injuries, 0);
+  const totalDamage = features.reduce((s, f) => s + f.properties.damage, 0);
+
+  animateCount(document.getElementById('statDisaster'), totalDisasters);
+  animateCount(document.getElementById('statDeaths'), totalDeaths);
+  animateCount(document.getElementById('statInjuries'), totalInjuries);
+  // Damage uses rupiah formatter directly
+  animateCount(document.getElementById('statDamage'), totalDamage, '', '', true);
+}
+
+
+/* ══════════════════════════════════════════
+   9. TOP RISK REGIONS
+══════════════════════════════════════════ */
+/**
+ * Risk sort weight: high → 3, medium → 2, low → 1
+ */
+function riskWeight(r) {
+  return { high: 3, medium: 2, low: 1 }[r] || 0;
+}
+
+/**
+ * Sorts features by risk + deaths + damage, then renders the top-5 list.
+ *
+ * @param {Array} features
+ */
+function updateTopRegions(features) {
+  const sorted = [...features].sort((a, b) => {
+    const rA = riskWeight(a.properties.risk_level);
+    const rB = riskWeight(b.properties.risk_level);
+    if (rB !== rA) return rB - rA;                        // Risk first
+    if (b.properties.deaths !== a.properties.deaths)      // Then deaths
+      return b.properties.deaths - a.properties.deaths;
+    return b.properties.damage - a.properties.damage;     // Then damage
+  });
+
+  const top = sorted.slice(0, 5);
+  const container = document.getElementById('topRegions');
+  container.innerHTML = '';
+
+  top.forEach((f, i) => {
+    const p = f.properties;
+    const rankClass = i < 3 ? `rank-${i + 1}` : '';
+    const pillClass = `risk-pill-${p.risk_level}`;
+    const riskLabel = CONFIG.riskLabels[p.risk_level] || p.risk_level;
+
+    const item = document.createElement('div');
+    item.className = 'top-region-item';
+    item.style.animationDelay = `${i * 60}ms`;
+    item.innerHTML = `
+      <div class="top-rank ${rankClass}">${i + 1}</div>
+      <div class="top-region-info">
+        <div class="top-region-name">${p.name}</div>
+        <div class="top-region-meta">${p.disaster_type} · ${p.deaths} jiwa</div>
+      </div>
+      <span class="top-risk-pill ${pillClass}">${riskLabel}</span>`;
+
+    // Click to zoom to this region
+    item.addEventListener('click', () => zoomToRegion(p.name));
+    container.appendChild(item);
+  });
+}
+
+
+/* ══════════════════════════════════════════
+   10. INSIGHT GENERATOR
+══════════════════════════════════════════ */
+/**
+ * Auto-generates a human-readable insight sentence from the current data.
+ *
+ * @param {Array} features
+ */
+function updateInsight(features) {
+  const el = document.getElementById('insightText');
+
+  if (!features.length) {
+    el.textContent = 'Tidak ada data untuk filter yang dipilih.';
+    return;
+  }
+
+  // Find region with most deaths
+  const byDeaths = [...features].sort((a, b) => b.properties.deaths - a.properties.deaths)[0];
+  // Find disaster type with highest frequency
+  const typeCounts = {};
+  features.forEach(f => {
+    typeCounts[f.properties.disaster_type] = (typeCounts[f.properties.disaster_type] || 0) + 1;
+  });
+  const dominantType = Object.entries(typeCounts).sort((a, b) => b[1] - a[1])[0];
+
+  // Count high-risk regions
+  const highCount = features.filter(f => f.properties.risk_level === 'high').length;
+
+  const p = byDeaths.properties;
+  let text = `Wilayah dengan risiko tertinggi adalah <strong>${p.name}</strong> akibat bencana ${p.disaster_type} dengan ${p.deaths} korban jiwa dan kerugian ${formatRupiah(p.damage)}. `;
+
+  if (highCount > 0) {
+    text += `Terdapat <strong>${highCount}</strong> wilayah berkategori risiko tinggi. `;
+  }
+
+  if (dominantType) {
+    text += `Jenis bencana yang paling sering terjadi adalah <strong>${dominantType[0]}</strong> (${dominantType[1]} wilayah).`;
+  }
+
+  el.innerHTML = text;
+}
+
+
+/* ══════════════════════════════════════════
+   11. UI UTILITIES
+══════════════════════════════════════════ */
+
+/** Sidebar toggle (mobile + desktop collapse) */
+function initSidebarToggle() {
+  const sidebar = document.getElementById('sidebar');
+  const btn = document.getElementById('menuToggle');
+
+  btn.addEventListener('click', () => {
+    sidebar.classList.toggle('collapsed');
+    // After animation, invalidate map size so tiles re-render
+    setTimeout(() => STATE.map && STATE.map.invalidateSize(), 320);
+  });
+}
+
+/** Close modal on overlay click or close button */
+function initModal() {
+  const overlay = document.getElementById('regionModalOverlay');
+  const closeBtn = document.getElementById('modalClose');
+
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) overlay.classList.remove('show');
+  });
+  closeBtn.addEventListener('click', () => overlay.classList.remove('show'));
+}
+
+/** Live clock in topbar */
+function initClock() {
+  const el = document.getElementById('topbarTime');
+
+  function tick() {
+    const now = new Date();
+    el.textContent = now.toLocaleTimeString('id-ID', {
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+    }) + ' WIB';
+  }
+  tick();
+  setInterval(tick, 1000);
+}
+
+
+/* ══════════════════════════════════════════
+   BOOT – Application Entry Point
+══════════════════════════════════════════ */
+(function boot() {
+  initMap();           // 1. Create Leaflet map
+  loadGeoJSON();       // 2. Fetch & render GeoJSON data
+  initFilterButtons(); // 3. Wire filter buttons
+  initSearch();        // 4. Wire search box
+  initSidebarToggle(); // 5. Hamburger menu
+  initModal();         // 6. Region detail modal
+  initClock();         // 7. Live clock
+})();
