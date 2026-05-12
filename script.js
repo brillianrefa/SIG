@@ -21,7 +21,7 @@
 ══════════════════════════════════════════ */
 const CONFIG = {
   /** Path to the GeoJSON data file */
-  geojsonPath: 'data/bencana_kabkota_final.geojson',
+  geojsonPath: 'data/jatim.geojson',
 
   /** Initial map center: East Java centroid */
   mapCenter: [-7.5360, 112.2384],
@@ -41,6 +41,21 @@ const CONFIG = {
     low: 'Risiko Rendah',
   },
 };
+
+/** Human-friendly disaster type labels (GeoJSON value → display) */
+const DISASTER_LABELS = {
+  BANJIR: 'Banjir',
+  'CUACA EKSTREM': 'Cuaca Ekstrem',
+  'TANAH LONGSOR': 'Tanah Longsor',
+  KEKERINGAN: 'Kekeringan',
+  GEMPABUMI: 'Gempa Bumi',
+  'ERUPSI GUNUNG API': 'Gunung Meletus',
+};
+
+/** Normalise a GeoJSON disaster_type value for display */
+function disasterLabel(raw) {
+  return DISASTER_LABELS[raw] || raw;
+}
 
 /**
  * Application state – single source of truth.
@@ -224,28 +239,29 @@ function formatRupiah(amount) {
 function buildPopupHTML(props) {
   const risk = props.risk_level;
   const riskLabel = CONFIG.riskLabels[risk] || risk;
+  const label = disasterLabel(props.disaster_type);
   return `
     <div class="custom-popup">
       <div class="popup-header ${risk}">
         <div class="popup-risk-label">${riskLabel}</div>
         <div class="popup-name">${props.name}</div>
-        <div class="popup-disaster">🏷️ ${props.disaster_type}</div>
+        <div class="popup-disaster">${label}</div>
       </div>
       <div class="popup-body">
         <div class="popup-stat">
-          <div class="popup-stat-val">💔 ${props.deaths}</div>
+          <div class="popup-stat-val">${props.deaths.toLocaleString('id-ID')}</div>
           <div class="popup-stat-lbl">Korban Jiwa</div>
         </div>
         <div class="popup-stat">
-          <div class="popup-stat-val">🏥 ${props.injuries}</div>
+          <div class="popup-stat-val">${props.injuries.toLocaleString('id-ID')}</div>
           <div class="popup-stat-lbl">Luka-luka</div>
         </div>
         <div class="popup-stat">
           <div class="popup-stat-val">${formatRupiah(props.damage)}</div>
-          <div class="popup-stat-lbl">Kerugian</div>
+          <div class="popup-stat-lbl">Kerugian Materi</div>
         </div>
         <div class="popup-stat">
-          <div class="popup-stat-val">📊 ${riskLabel}</div>
+          <div class="popup-stat-val">${riskLabel}</div>
           <div class="popup-stat-lbl">Tingkat Risiko</div>
         </div>
       </div>
@@ -266,11 +282,105 @@ function openRegionModal(props) {
   header.className = 'modal-header ' + risk;
   document.getElementById('modalRiskBadge').textContent = CONFIG.riskLabels[risk] || risk;
   document.getElementById('modalName').textContent = props.name;
-  document.getElementById('modalDisaster').textContent = '🏷️ ' + props.disaster_type;
-  document.getElementById('modalDeaths').textContent = props.deaths;
-  document.getElementById('modalInjuries').textContent = props.injuries;
+  document.getElementById('modalDisaster').textContent = disasterLabel(props.disaster_type);
+  document.getElementById('modalDeaths').textContent = props.deaths.toLocaleString('id-ID');
+  document.getElementById('modalInjuries').textContent = props.injuries.toLocaleString('id-ID');
   document.getElementById('modalDamage').textContent = formatRupiah(props.damage);
   document.getElementById('modalRisk').textContent = CONFIG.riskLabels[risk] || risk;
+
+  overlay.classList.add('show');
+}
+
+/**
+ * Aggregates all disaster records for a given region name.
+ * Returns a summary object for the popup/modal.
+ */
+function getRegionSummary(regionName) {
+  const features = STATE.geojsonData.features.filter(
+    f => f.properties.name === regionName
+  );
+
+  const totalDeaths = features.reduce((s, f) => s + f.properties.deaths, 0);
+  const totalInjuries = features.reduce((s, f) => s + f.properties.injuries, 0);
+  const totalDamage = features.reduce((s, f) => s + f.properties.damage, 0);
+
+  const riskOrder = { high: 3, medium: 2, low: 1 };
+  let worstRisk = 'low';
+  features.forEach(f => {
+    if (riskOrder[f.properties.risk_level] > riskOrder[worstRisk]) {
+      worstRisk = f.properties.risk_level;
+    }
+  });
+
+  const types = [...new Set(features.map(f => f.properties.disaster_type))];
+
+  return {
+    name: regionName,
+    risk_level: worstRisk,
+    deaths: totalDeaths,
+    injuries: totalInjuries,
+    damage: totalDamage,
+    disasterTypes: types,
+    recordCount: features.length,
+  };
+}
+
+/**
+ * Builds an aggregated popup showing all disasters for a region.
+ */
+function buildAggregatedPopupHTML(s) {
+  const riskLabel = CONFIG.riskLabels[s.risk_level] || s.risk_level;
+  const typeList = s.disasterTypes
+    .map(t => disasterLabel(t))
+    .join('<br>');
+
+  return `
+    <div class="custom-popup">
+      <div class="popup-header ${s.risk_level}">
+        <div class="popup-risk-label">${riskLabel} · ${s.recordCount} Bencana</div>
+        <div class="popup-name">${s.name}</div>
+        <div class="popup-disaster">${typeList}</div>
+      </div>
+      <div class="popup-body">
+        <div class="popup-stat">
+          <div class="popup-stat-val">${s.deaths.toLocaleString('id-ID')}</div>
+          <div class="popup-stat-lbl">Korban Jiwa</div>
+        </div>
+        <div class="popup-stat">
+          <div class="popup-stat-val">${s.injuries.toLocaleString('id-ID')}</div>
+          <div class="popup-stat-lbl">Luka-luka</div>
+        </div>
+        <div class="popup-stat">
+          <div class="popup-stat-val">${formatRupiah(s.damage)}</div>
+          <div class="popup-stat-lbl">Total Kerugian</div>
+        </div>
+        <div class="popup-stat">
+          <div class="popup-stat-val">${riskLabel}</div>
+          <div class="popup-stat-lbl">Risiko Tertinggi</div>
+        </div>
+      </div>
+    </div>`;
+}
+
+/**
+ * Opens the bottom modal with aggregated region data.
+ */
+function openAggregatedModal(s) {
+  const risk = s.risk_level;
+  const overlay = document.getElementById('regionModalOverlay');
+  const header = document.getElementById('modalHeader');
+
+  header.className = 'modal-header ' + risk;
+  document.getElementById('modalRiskBadge').textContent =
+    CONFIG.riskLabels[risk] + ' · ' + s.recordCount + ' Bencana';
+  document.getElementById('modalName').textContent = s.name;
+  document.getElementById('modalDisaster').textContent = s.disasterTypes
+    .map(t => disasterLabel(t))
+    .join('  ·  ');
+  document.getElementById('modalDeaths').textContent = s.deaths.toLocaleString('id-ID');
+  document.getElementById('modalInjuries').textContent = s.injuries.toLocaleString('id-ID');
+  document.getElementById('modalDamage').textContent = formatRupiah(s.damage);
+  document.getElementById('modalRisk').textContent = CONFIG.riskLabels[risk];
 
   overlay.classList.add('show');
 }
@@ -284,20 +394,39 @@ function openRegionModal(props) {
 function onEachFeature(feature, layer) {
   const props = feature.properties;
 
-  // Store reference for search zoom
-  STATE.layerMap[props.name] = layer;
+  // Store reference for search zoom (keyed by name for quick lookup)
+  if (!STATE.layerMap[props.name]) {
+    STATE.layerMap[props.name] = [];
+  }
+  STATE.layerMap[props.name].push(layer);
 
-  // ── Hover: highlight ──
+  // ── Hover: highlight + rich tooltip ──
   layer.on('mouseover', function (e) {
     this.setStyle(styleHighlight(props.risk_level));
     this.bringToFront();
 
-    // Show tooltip near cursor
-    this.bindTooltip(`<strong>${props.name}</strong><br/>${props.disaster_type}`, {
+    const label = disasterLabel(props.disaster_type);
+    const riskLabel = CONFIG.riskLabels[props.risk_level];
+    const riskDot = getRiskColor(props.risk_level);
+
+    const tip = `
+      <div class="tt-card">
+        <div class="tt-name">${props.name}</div>
+        <div class="tt-disaster">${label}</div>
+        <div class="tt-risk">
+          <span class="tt-dot" style="background:${riskDot}"></span>${riskLabel}
+        </div>
+        <div class="tt-meta">
+          ${props.deaths.toLocaleString('id-ID')} korban jiwa  ·  ${formatRupiah(props.damage)} kerugian
+        </div>
+      </div>`;
+
+    this.bindTooltip(tip, {
       permanent: false,
       direction: 'top',
-      className: 'leaflet-tooltip',
-      offset: [0, -6],
+      className: 'map-tooltip',
+      offset: [0, -10],
+      opacity: 0.96,
     }).openTooltip(e.latlng);
   });
 
@@ -305,18 +434,25 @@ function onEachFeature(feature, layer) {
   layer.on('mouseout', function () {
     STATE.geojsonLayer.resetStyle(this);
     this.closeTooltip();
+    this.unbindTooltip();
   });
 
-  // ── Click: show popup + bottom modal ──
+  // ── Click: popup + modal (aggregated if "Semua" filter) ──
   layer.on('click', function (e) {
-    // Popup on map
-    L.popup({ maxWidth: 280, offset: [0, -6] })
-      .setLatLng(e.latlng)
-      .setContent(buildPopupHTML(props))
-      .openOn(STATE.map);
-
-    // Bottom modal (good for mobile)
-    openRegionModal(props);
+    if (STATE.activeFilter === 'Semua') {
+      const summary = getRegionSummary(props.name);
+      L.popup({ maxWidth: 320, offset: [0, -10] })
+        .setLatLng(e.latlng)
+        .setContent(buildAggregatedPopupHTML(summary))
+        .openOn(STATE.map);
+      openAggregatedModal(summary);
+    } else {
+      L.popup({ maxWidth: 280, offset: [0, -10] })
+        .setLatLng(e.latlng)
+        .setContent(buildPopupHTML(props))
+        .openOn(STATE.map);
+      openRegionModal(props);
+    }
   });
 }
 
@@ -329,13 +465,26 @@ function onEachFeature(feature, layer) {
  *
  * @param {string} filterValue - disaster type or 'Semua'
  */
+/**
+ * Maps filter button value → actual disaster_type in GeoJSON.
+ */
+const FILTER_MAP = {
+  'Banjir': 'Banjir',
+  'Cuaca Ekstrem': 'Cuaca Ekstrem',
+  'Tanah Longsor': 'Tanah Longsor',
+  'Kekeringan': 'Kekeringan',
+  'Gempa Bumi': 'Gempa Bumi',
+  'Gunung Meletus': 'Gunung Meletus',
+};
+
 function applyFilter(filterValue) {
   STATE.activeFilter = filterValue;
 
   const allFeatures = STATE.geojsonData.features;
+  const dataType = FILTER_MAP[filterValue];
   const filtered = filterValue === 'Semua'
     ? allFeatures
-    : allFeatures.filter(f => f.properties.disaster_type === filterValue);
+    : allFeatures.filter(f => f.properties.disaster_type === dataType);
 
   renderGeoJSON(filtered);
   updateDashboard(filtered);
@@ -381,9 +530,15 @@ function handleSearch(query) {
   }
 
   const q = query.toLowerCase();
+  const seen = new Set();
   const matches = STATE.geojsonData.features
-    .filter(f => f.properties.name.toLowerCase().includes(q))
-    .slice(0, 6); // max 6 results
+    .filter(f => {
+      const name = f.properties.name.toLowerCase();
+      if (seen.has(name) || !name.includes(q)) return false;
+      seen.add(name);
+      return true;
+    })
+    .slice(0, 6);
 
   if (matches.length === 0) {
     dropdown.innerHTML = `<div class="search-result-item" style="color:#999">Tidak ditemukan</div>`;
@@ -394,11 +549,19 @@ function handleSearch(query) {
   dropdown.innerHTML = matches.map(f => {
     const p = f.properties;
     const color = getRiskColor(p.risk_level);
+    const regionSummary = getRegionSummary(p.name);
+    const typePreview = regionSummary.disasterTypes
+      .slice(0, 3)
+      .map(t => disasterLabel(t))
+      .join(', ');
+    const more = regionSummary.disasterTypes.length > 3
+      ? ` +${regionSummary.disasterTypes.length - 3}`
+      : '';
     return `
       <div class="search-result-item" data-name="${p.name}">
         <span class="search-result-dot" style="background:${color}"></span>
         <span class="search-result-name">${p.name}</span>
-        <span class="search-result-type">${p.disaster_type}</span>
+        <span class="search-result-type">${typePreview}${more}</span>
       </div>`;
   }).join('');
 
@@ -414,29 +577,38 @@ function zoomToRegion(name) {
   const feature = STATE.geojsonData.features.find(f => f.properties.name === name);
   if (!feature) return;
 
-  const layer = STATE.layerMap[name];
-  if (!layer) return;
+  const layers = STATE.layerMap[name];
+  if (!layers || !layers.length) return;
+
+  const firstLayer = layers[0];
 
   // Close search UI
   document.getElementById('searchInput').value = name;
   hideSearchDropdown();
 
   // Pan/zoom to region bounds
-  STATE.map.fitBounds(layer.getBounds(), { padding: [40, 40] });
+  STATE.map.fitBounds(firstLayer.getBounds(), { padding: [40, 40] });
 
-  // Highlight it briefly
-  layer.setStyle(styleHighlight(feature.properties.risk_level));
-  setTimeout(() => STATE.geojsonLayer.resetStyle(layer), 2000);
+  // Highlight all layers for this region briefly
+  layers.forEach(l => l.setStyle(styleHighlight(feature.properties.risk_level)));
+  setTimeout(() => layers.forEach(l => STATE.geojsonLayer.resetStyle(l)), 2000);
 
-  // Open popup at centroid
-  const center = layer.getBounds().getCenter();
-  L.popup({ maxWidth: 280 })
-    .setLatLng(center)
-    .setContent(buildPopupHTML(feature.properties))
-    .openOn(STATE.map);
-
-  // Also open modal
-  openRegionModal(feature.properties);
+  // Open popup at centroid (aggregated if "Semua" filter)
+  const center = firstLayer.getBounds().getCenter();
+  if (STATE.activeFilter === 'Semua') {
+    const summary = getRegionSummary(name);
+    L.popup({ maxWidth: 320 })
+      .setLatLng(center)
+      .setContent(buildAggregatedPopupHTML(summary))
+      .openOn(STATE.map);
+    openAggregatedModal(summary);
+  } else {
+    L.popup({ maxWidth: 280 })
+      .setLatLng(center)
+      .setContent(buildPopupHTML(feature.properties))
+      .openOn(STATE.map);
+    openRegionModal(feature.properties);
+  }
 }
 
 /** Hides the autocomplete dropdown */
@@ -569,7 +741,7 @@ function updateTopRegions(features) {
       <div class="top-rank ${rankClass}">${i + 1}</div>
       <div class="top-region-info">
         <div class="top-region-name">${p.name}</div>
-        <div class="top-region-meta">${p.disaster_type} · ${p.deaths} jiwa</div>
+        <div class="top-region-meta">${disasterLabel(p.disaster_type)} · ${p.deaths} jiwa</div>
       </div>
       <span class="top-risk-pill ${pillClass}">${riskLabel}</span>`;
 
@@ -609,14 +781,14 @@ function updateInsight(features) {
   const highCount = features.filter(f => f.properties.risk_level === 'high').length;
 
   const p = byDeaths.properties;
-  let text = `Wilayah dengan risiko tertinggi adalah <strong>${p.name}</strong> akibat bencana ${p.disaster_type} dengan ${p.deaths} korban jiwa dan kerugian ${formatRupiah(p.damage)}. `;
+  let text = `Wilayah dengan risiko tertinggi adalah <strong>${p.name}</strong> akibat bencana ${disasterLabel(p.disaster_type)} dengan ${p.deaths} korban jiwa dan kerugian ${formatRupiah(p.damage)}. `;
 
   if (highCount > 0) {
     text += `Terdapat <strong>${highCount}</strong> wilayah berkategori risiko tinggi. `;
   }
 
   if (dominantType) {
-    text += `Jenis bencana yang paling sering terjadi adalah <strong>${dominantType[0]}</strong> (${dominantType[1]} wilayah).`;
+    text += `Jenis bencana yang paling sering terjadi adalah <strong>${disasterLabel(dominantType[0])}</strong> (${dominantType[1]} wilayah).`;
   }
 
   el.innerHTML = text;
