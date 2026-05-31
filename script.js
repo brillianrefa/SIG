@@ -20,8 +20,8 @@
    1. CONFIG & STATE
 ══════════════════════════════════════════ */
 const CONFIG = {
-  /** Path to the GeoJSON data file */
-  geojsonPath: 'data/jatim.geojson',
+  /** Path to the main city/regency boundary file */
+  geojsonPath: 'data/jatim_kabkota_final.geojson',
 
   /** Initial map center: East Java centroid */
   mapCenter: [-7.5360, 112.2384],
@@ -114,8 +114,11 @@ function initMap() {
  */
 async function loadGeoJSON() {
   try {
+    document.getElementById('mapLoading').classList.remove('hidden');
+
     const response = await fetch(CONFIG.geojsonPath);
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    
     STATE.geojsonData = await response.json();
 
     // Hide loading screen
@@ -123,9 +126,12 @@ async function loadGeoJSON() {
 
     // Initial render with all data
     renderGeoJSON(STATE.geojsonData.features);
-    updateDashboard(STATE.geojsonData.features);
-    updateTopRegions(STATE.geojsonData.features);
-    updateInsight(STATE.geojsonData.features);
+    
+    // Update dashboard using affected features
+    const affected = STATE.geojsonData.features.filter(f => f.properties.risk_level !== 'safe');
+    updateDashboard(affected);
+    updateTopRegions(affected);
+    updateInsight(affected);
 
   } catch (err) {
     console.error('Failed to load GeoJSON:', err);
@@ -134,7 +140,7 @@ async function loadGeoJSON() {
       <div style="text-align:center;color:#D64545;padding:24px">
         <div style="font-size:32px">⚠️</div>
         <p style="margin-top:8px;font-weight:600">Gagal memuat data peta</p>
-        <p style="font-size:12px;margin-top:4px;color:#666">Pastikan file <code>data/jatim.geojson</code> tersedia</p>
+        <p style="font-size:12px;margin-top:4px;color:#666">Pastikan file <code>${CONFIG.geojsonPath}</code> tersedia</p>
         <p style="font-size:11px;margin-top:4px;color:#999">${err.message}</p>
       </div>`;
   }
@@ -187,25 +193,57 @@ function getRiskColor(riskLevel) {
  * @returns {Object} Leaflet PathOptions
  */
 function styleFeature(feature) {
-  const risk = feature.properties.risk_level;
+  let risk = feature.properties.risk_level;
+
+  // Apply filter dynamically
+  if (STATE.activeFilter !== 'Semua') {
+    const reqType = FILTER_MAP[STATE.activeFilter];
+    if (feature.properties.disaster_type !== reqType) {
+      risk = 'safe';
+    }
+  }
+
+  if (risk === 'safe' || !risk) {
+    return {
+      fillOpacity: 0,
+      color: '#888888', // Thin grey border for safe villages
+      weight: 0.5,
+      opacity: 0.5,
+    };
+  }
+
   return {
     fillColor: getRiskColor(risk),
-    fillOpacity: 0.65,
-    color: '#FFFFFF',
-    weight: 1.8,
-    opacity: 0.9,
+    fillOpacity: 0.75,
+    color: '#444444',
+    weight: 0.8,
+    opacity: 0.8,
   };
 }
 
 /**
  * Returns highlight style on hover.
  */
-function styleHighlight(risk) {
+function styleHighlight(feature) {
+  let risk = feature.properties.risk_level;
+  if (STATE.activeFilter !== 'Semua' && feature.properties.disaster_type !== FILTER_MAP[STATE.activeFilter]) {
+    risk = 'safe';
+  }
+
+  if (risk === 'safe' || !risk) {
+    return {
+      fillOpacity: 0.1,
+      color: '#555555',
+      weight: 1,
+      opacity: 0.8,
+    };
+  }
+
   return {
     fillColor: getRiskColor(risk),
-    fillOpacity: 0.85,
-    color: '#1F4739',
-    weight: 2.5,
+    fillOpacity: 0.9,
+    color: '#FFFFFF',
+    weight: 2,
     opacity: 1,
   };
 }
@@ -402,32 +440,40 @@ function onEachFeature(feature, layer) {
 
   // ── Hover: highlight + rich tooltip ──
   layer.on('mouseover', function (e) {
-    this.setStyle(styleHighlight(props.risk_level));
-    this.bringToFront();
+    this.setStyle(styleHighlight(feature));
+    
+    // Do not show tooltip for safe villages
+    let isSafe = props.risk_level === 'safe';
+    if (STATE.activeFilter !== 'Semua' && props.disaster_type !== FILTER_MAP[STATE.activeFilter]) {
+      isSafe = true;
+    }
 
-    const label = disasterLabel(props.disaster_type);
-    const riskLabel = CONFIG.riskLabels[props.risk_level];
-    const riskDot = getRiskColor(props.risk_level);
+    if (!isSafe) {
+      this.bringToFront();
+      const label = disasterLabel(props.disaster_type);
+      const riskLabel = CONFIG.riskLabels[props.risk_level];
+      const riskDot = getRiskColor(props.risk_level);
 
-    const tip = `
-      <div class="tt-card">
-        <div class="tt-name">${props.name}</div>
-        <div class="tt-disaster">${label}</div>
-        <div class="tt-risk">
-          <span class="tt-dot" style="background:${riskDot}"></span>${riskLabel}
-        </div>
-        <div class="tt-meta">
-          ${props.deaths.toLocaleString('id-ID')} korban jiwa  ·  ${formatRupiah(props.damage)} kerugian
-        </div>
-      </div>`;
+      const tip = `
+        <div class="tt-card">
+          <div class="tt-name">${props.name}</div>
+          <div class="tt-disaster">${label}</div>
+          <div class="tt-risk">
+            <span class="tt-dot" style="background:${riskDot}"></span>${riskLabel}
+          </div>
+          <div class="tt-meta">
+            ${props.deaths.toLocaleString('id-ID')} korban jiwa  ·  ${formatRupiah(props.damage)} kerugian
+          </div>
+        </div>`;
 
-    this.bindTooltip(tip, {
-      permanent: false,
-      direction: 'top',
-      className: 'map-tooltip',
-      offset: [0, -10],
-      opacity: 0.96,
-    }).openTooltip(e.latlng);
+      this.bindTooltip(tip, {
+        permanent: false,
+        direction: 'top',
+        className: 'map-tooltip',
+        offset: [0, -10],
+        opacity: 0.96,
+      }).openTooltip(e.latlng);
+    }
   });
 
   // ── Mouse out: reset style ──
@@ -439,6 +485,12 @@ function onEachFeature(feature, layer) {
 
   // ── Click: popup + modal (aggregated if "Semua" filter) ──
   layer.on('click', function (e) {
+    let isSafe = props.risk_level === 'safe';
+    if (STATE.activeFilter !== 'Semua' && props.disaster_type !== FILTER_MAP[STATE.activeFilter]) {
+      isSafe = true;
+    }
+    if (isSafe) return; // Do not open popup for safe villages
+
     if (STATE.activeFilter === 'Semua') {
       const summary = getRegionSummary(props.name);
       L.popup({ maxWidth: 320, offset: [0, -10] })
@@ -480,16 +532,19 @@ const FILTER_MAP = {
 function applyFilter(filterValue) {
   STATE.activeFilter = filterValue;
 
-  const allFeatures = STATE.geojsonData.features;
-  const dataType = FILTER_MAP[filterValue];
-  const filtered = filterValue === 'Semua'
-    ? allFeatures
-    : allFeatures.filter(f => f.properties.disaster_type === dataType);
+  // Re-style existing layer efficiently instead of re-rendering 8500 polygons
+  STATE.geojsonLayer.setStyle(styleFeature);
 
-  renderGeoJSON(filtered);
-  updateDashboard(filtered);
-  updateTopRegions(filtered);
-  updateInsight(filtered);
+  // Update dashboard and stats with only affected/matching features
+  const affectedFeatures = STATE.geojsonData.features.filter(f => {
+    if (f.properties.risk_level === 'safe') return false;
+    if (filterValue === 'Semua') return true;
+    return f.properties.disaster_type === FILTER_MAP[filterValue];
+  });
+
+  updateDashboard(affectedFeatures);
+  updateTopRegions(affectedFeatures);
+  updateInsight(affectedFeatures);
 
   // Update topbar badge
   document.getElementById('activeBadge').textContent =
