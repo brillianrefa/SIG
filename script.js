@@ -136,11 +136,16 @@ async function loadGeoJSON() {
   } catch (err) {
     console.error('Failed to load GeoJSON:', err);
     const loading = document.getElementById('mapLoading');
+    const isFileProtocol = window.location.protocol === 'file:';
     loading.innerHTML = `
       <div style="text-align:center;color:#D64545;padding:24px">
         <div style="font-size:32px">⚠️</div>
         <p style="margin-top:8px;font-weight:600">Gagal memuat data peta</p>
-        <p style="font-size:12px;margin-top:4px;color:#666">Pastikan file <code>${CONFIG.geojsonPath}</code> tersedia</p>
+        <p style="font-size:12px;margin-top:4px;color:#666">
+          ${isFileProtocol
+            ? 'Gunakan server lokal. Jalankan di terminal:<br><code style="background:#eee;padding:2px 6px;border-radius:4px">npx serve</code>'
+            : `Pastikan file <code>${CONFIG.geojsonPath}</code> tersedia`}
+        </p>
         <p style="font-size:11px;margin-top:4px;color:#999">${err.message}</p>
       </div>`;
   }
